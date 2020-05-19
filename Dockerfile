@@ -10,4 +10,6 @@ RUN make tools
 
 RUN make fmt
 
-RUN make build
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build
+
+RUN chmod +x $GOPATH/bin/terraform-provider-azurerm
