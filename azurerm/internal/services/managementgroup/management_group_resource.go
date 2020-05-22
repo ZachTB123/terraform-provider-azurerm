@@ -90,12 +90,16 @@ func resourceArmManagementGroupCreateUpdate(d *schema.ResourceData, meta interfa
 	defer cancel()
 	armTenantID := meta.(*clients.Client).Account.TenantId
 
-	groupName := uuid.New().String()
-	if v, ok := d.GetOk("name"); ok {
+	var groupName string
+	if v := d.Get("group_id"); v != "" {
 		groupName = v.(string)
 	}
-	if v, ok := d.GetOk("group_id"); ok {
+	if v := d.Get("name"); v != "" {
 		groupName = v.(string)
+	}
+
+	if groupName == "" {
+		groupName = uuid.New().String()
 	}
 
 	parentManagementGroupId := d.Get("parent_management_group_id").(string)
@@ -107,12 +111,11 @@ func resourceArmManagementGroupCreateUpdate(d *schema.ResourceData, meta interfa
 	if d.IsNewResource() {
 		existing, err := client.Get(ctx, groupName, "children", &recurse, "", managementGroupCacheControl)
 		if err != nil {
-			// 403 is returned if it doesn't exist or user doesn't have proper permissions to view it
-			if utils.ResponseWasForbidden(existing.Response) {
-				log.Printf("[DEBUG] Management Group %q does not exist or authorization is forbidden from the user", groupName)
+			// 403 is returned if group does not exist, bug tracked at: https://github.com/Azure/azure-rest-api-specs/issues/9549
+			if !utils.ResponseWasNotFound(existing.Response) && !utils.ResponseWasForbidden(existing.Response) {
+				return fmt.Errorf("unable to check for presence of existing Management Group %q: %s", groupName, err)
 			}
 		}
-
 		if existing.ID != nil && *existing.ID != "" {
 			return tf.ImportAsExistsError("azurerm_management_group", *existing.ID)
 		}
@@ -132,7 +135,7 @@ func resourceArmManagementGroupCreateUpdate(d *schema.ResourceData, meta interfa
 		},
 	}
 
-	if v, ok := d.GetOk("display_name"); ok {
+	if v := d.Get("display_name"); v != "" {
 		properties.CreateManagementGroupProperties.DisplayName = utils.String(v.(string))
 	}
 
@@ -145,9 +148,18 @@ func resourceArmManagementGroupCreateUpdate(d *schema.ResourceData, meta interfa
 		return fmt.Errorf("failed when waiting for creation of Management Group %q: %+v", groupName, err)
 	}
 
-	resp, err := client.Get(ctx, groupName, "children", &recurse, "", managementGroupCacheControl)
-	if err != nil {
-		return fmt.Errorf("unable to retrieve Management Group %q: %+v", groupName, err)
+	var resp managementgroups.ManagementGroup
+	respErr := utils.Retry(5, 10*time.Second, func(attempt int) error {
+		g, e := client.Get(ctx, groupName, "children", &recurse, "", managementGroupCacheControl)
+		if e != nil {
+			log.Printf("[DEBUG] Attempt: %d. Failed to get Management Group %q after CreateOrUpdate: %+v", attempt, groupName, e)
+			return e
+		}
+		resp = g
+		return nil
+	})
+	if respErr != nil {
+		return fmt.Errorf("unable to retrieve Management Group %q: %+v", groupName, respErr)
 	}
 
 	d.SetId(*resp.ID)
@@ -200,7 +212,7 @@ func resourceArmManagementGroupRead(d *schema.ResourceData, meta interface{}) er
 	recurse := true
 	resp, err := client.Get(ctx, id.GroupId, "children", &recurse, "", managementGroupCacheControl)
 	if err != nil {
-		if utils.ResponseWasForbidden(resp.Response) {
+		if utils.ResponseWasForbidden(resp.Response) || utils.ResponseWasNotFound(resp.Response) {
 			log.Printf("[INFO] Management Group %q doesn't exist - removing from state", d.Id())
 			d.SetId("")
 			return nil
@@ -249,7 +261,7 @@ func resourceArmManagementGroupDelete(d *schema.ResourceData, meta interface{}) 
 	recurse := true
 	group, err := client.Get(ctx, id.GroupId, "children", &recurse, "", managementGroupCacheControl)
 	if err != nil {
-		if utils.ResponseWasNotFound(group.Response) {
+		if utils.ResponseWasNotFound(group.Response) || utils.ResponseWasForbidden(group.Response) {
 			log.Printf("[DEBUG] Management Group %q doesn't exist in Azure - nothing to do!", id.GroupId)
 			return nil
 		}
