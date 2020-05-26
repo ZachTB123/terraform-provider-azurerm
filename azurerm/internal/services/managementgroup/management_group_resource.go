@@ -148,9 +148,18 @@ func resourceArmManagementGroupCreateUpdate(d *schema.ResourceData, meta interfa
 		return fmt.Errorf("failed when waiting for creation of Management Group %q: %+v", groupName, err)
 	}
 
-	resp, err := client.Get(ctx, groupName, "children", &recurse, "", managementGroupCacheControl)
-	if err != nil {
-		return fmt.Errorf("unable to retrieve Management Group %q: %+v", groupName, err)
+	var resp managementgroups.ManagementGroup
+	respErr := utils.RetryWithLinearDelay(5, 10*time.Second, func(attempt int) error {
+		g, e := client.Get(ctx, groupName, "children", &recurse, "", managementGroupCacheControl)
+		if e != nil {
+			log.Printf("[DEBUG] Attempt: %d. Failed to get Management Group %q after CreateOrUpdate: %+v", attempt, groupName, e)
+			return e
+		}
+		resp = g
+		return nil
+	})
+	if respErr != nil {
+		return fmt.Errorf("unable to retrieve Management Group %q: %+v", groupName, respErr)
 	}
 
 	d.SetId(*resp.ID)
